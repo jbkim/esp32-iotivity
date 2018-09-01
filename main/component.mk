@@ -11,6 +11,8 @@ ifdef CONFIG_IOTIVITY_SERVER
 	COMPONENT_SRCDIRS += esp32_server
 endif
 
-COMPONENT_SRCDIRS += esp32_lightbulb
+# COMPONENT_SRCDIRS += esp32_lightbulb
+# COMPONENT_ADD_INCLUDEDIRS := esp32_lightbulb
 
-COMPONENT_ADD_INCLUDEDIRS := esp32_lightbulb
+COMPONENT_SRCDIRS += esp32_smartaircon
+COMPONENT_ADD_INCLUDEDIRS := esp32_smartaircon

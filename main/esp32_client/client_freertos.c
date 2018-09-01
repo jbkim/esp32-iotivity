@@ -47,50 +47,65 @@ static EventGroupHandle_t wifi_event_group;
 static const int IPV4_CONNECTED_BIT = BIT0;
 static const int IPV6_CONNECTED_BIT = BIT1;
 
+static const char *RTYPE = "oic.r.tempsensor";
+
 static int
 app_init(void)
 {
-  int ret = oc_init_platform("Intel Corporation", NULL, NULL);
-  ret |= oc_add_device("/oic/d", "oic.wk.d", "Generic Client", "ocf.1.0.0",
+  int ret = oc_init_platform("ATEAM Ventures", NULL, NULL);
+  // ret |= oc_add_device("/oic/d", "oic.wk.d", "Generic Client", "ocf.1.0.0",
+  ret |= oc_add_device("/oic/d", "oic.d.smartmist", "Generic Client", "ocf.1.0.0",    
                        "ocf.res.1.3.0", NULL, NULL);
   return ret;
 }
 
 #define MAX_URI_LENGTH (30)
-static char light_1[MAX_URI_LENGTH];
-static oc_endpoint_t *light_server;
-static bool light_state = false;
+static char temp_1[MAX_URI_LENGTH]; // uri
+static oc_endpoint_t *temp_sensor;
+static int temperature;
+// static bool light_state = false;
 
 static oc_event_callback_retval_t
 stop_observe(void *data)
 {
   (void)data;
   PRINT("Stopping OBSERVE\n");
-  oc_stop_observe(light_1, light_server);
+  oc_stop_observe(temp_1, temp_sensor);
   return OC_EVENT_DONE;
 }
 
 static void
-post_light(oc_client_response_t *data)
+get_temp(oc_client_response_t *data)
 {
-  PRINT("POST_light:\n");
-  if (data->code == OC_STATUS_CHANGED)
-    PRINT("POST response OK\n");
-  else
-    PRINT("POST response code %d\n", data->code);
+  //  key temperature, value key units, value key range, value
+  
+  oc_rep_t *rep = data->payload;
+  while (rep != NULL) {
+    PRINT("key %s, value ", oc_string(rep->name));
+    switch (rep->type) {
+    case OC_REP_INT:
+      PRINT("%d\n", rep->value.integer);
+      temperature = rep->value.integer;
+      break;
+    default:
+      break;
+    }
+    rep = rep->next;
+  }
 }
 
+#if 0
 static void
-observe_light(oc_client_response_t *data)
+observe_mist(oc_client_response_t *data)
 {
-  PRINT("OBSERVE_light:\n");
+  PRINT("OBSERVE_mist:\n");
   oc_rep_t *rep = data->payload;
   while (rep != NULL) {
     PRINT("key %s, value ", oc_string(rep->name));
     switch (rep->type) {
     case OC_REP_BOOL:
       PRINT("%d\n", rep->value.boolean);
-      light_state = rep->value.boolean;
+      // light_state = rep->value.boolean;
       break;
     default:
       break;
@@ -104,10 +119,10 @@ observe_light(oc_client_response_t *data)
   int b_value = BULB_STATE_BLUE;
   int w_value = BULB_STATE_OTHERS;
 
-  if (oc_init_post(light_1, light_server, NULL, &post_light, LOW_QOS, NULL)) {
+  if (oc_init_post(temp_1, temp_sensor, NULL, &get_temp, LOW_QOS, NULL)) {
     oc_rep_start_root_object();
 
-    oc_rep_set_boolean(root, state, !light_state);
+    // oc_rep_set_boolean(root, state, !light_state);
 #ifdef ENABLE_LIGHT
     oc_rep_set_int(root, r_value, r_value);
     oc_rep_set_int(root, g_value, g_value);
@@ -125,6 +140,7 @@ observe_light(oc_client_response_t *data)
     PRINT("Could not init POST\n");
 }
 
+
 static oc_discovery_flags_t
 discovery(const char *di, const char *uri, oc_string_array_t types,
           oc_interface_mask_t interfaces, oc_endpoint_t *endpoint,
@@ -135,36 +151,82 @@ discovery(const char *di, const char *uri, oc_string_array_t types,
   (void)user_data;
   (void)bm;
   int i;
+
   int uri_len = strlen(uri);
   uri_len = (uri_len >= MAX_URI_LENGTH) ? MAX_URI_LENGTH - 1 : uri_len;
 
   for (i = 0; i < (int)oc_string_array_get_allocated_size(types); i++) {
     char *t = oc_string_array_get_item(types, i);
-    if (strlen(t) == 11 && strncmp(t, "oic.r.light", 11) == 0) {
-      strncpy(light_1, uri, uri_len);
-      light_1[uri_len] = '\0';
-      light_server = endpoint;
+    if (strlen(t) == 11 && strncmp(t, RTYPE, 11) == 0) {
+      strncpy(temp_1, uri, uri_len);
+      temp_1[uri_len] = '\0';
+      temp_sensor = endpoint;
 
-      PRINT("Resource %s hosted at endpoints:\n", light_1);
+      PRINT("Resource %s hosted at endpoints:\n", temp_1);
       oc_endpoint_t *ep = endpoint;
       while (ep != NULL) {
         PRINTipaddr(*ep);
         PRINT("\n");
         ep = ep->next;
       }
-      oc_do_observe(light_1, light_server, NULL, &observe_light, LOW_QOS, NULL);
+      oc_do_observe(temp_1, temp_sensor, NULL, &observe_mist, LOW_QOS, NULL);
       oc_set_delayed_callback(NULL, &stop_observe, 10);
+      return OC_STOP_DISCOVERY;
+    }
+  }
+
+  oc_free_server_endpoints(endpoint);
+  return OC_CONTINUE_DISCOVERY;
+}
+
+
+#else
+
+static oc_discovery_flags_t
+discovery(const char *anchor, const char *uri, oc_string_array_t types,
+          oc_interface_mask_t interfaces, oc_endpoint_t *endpoint,
+          oc_resource_properties_t bm, void *user_data)
+{
+  (void)anchor;
+  (void)interfaces;
+  (void)user_data;
+  (void)bm;
+
+  int i;
+  int uri_len = strlen(uri);
+  uri_len = (uri_len >= MAX_URI_LENGTH) ? MAX_URI_LENGTH - 1 : uri_len;
+
+  for (i = 0; i < (int)oc_string_array_get_allocated_size(types); i++) {
+    char *t = oc_string_array_get_item(types, i);
+    if (strlen(t) == 16 && strncmp(t, "oic.r.tempsensor", 16) == 0) {
+      temp_sensor = endpoint;
+      strncpy(temp_1, uri, uri_len);
+      temp_1[uri_len] = '\0';
+
+      PRINT("Resource %s hosted at endpoints:\n", temp_1);
+      oc_endpoint_t *ep = endpoint;
+      while (ep != NULL) {
+        PRINTipaddr(*ep);
+        PRINT("\n");
+        ep = ep->next;
+      }
+
+      oc_do_observe(temp_1, temp_sensor, NULL, &get_temp, HIGH_QOS, NULL);
+      oc_set_delayed_callback(NULL, &stop_observe, 30);
+
       return OC_STOP_DISCOVERY;
     }
   }
   oc_free_server_endpoints(endpoint);
   return OC_CONTINUE_DISCOVERY;
 }
+#endif
 
 static void
 issue_requests(void)
 {
-  oc_do_ip_discovery("oic.r.light", &discovery, NULL);
+  oc_do_ip_discovery(RTYPE, &discovery, NULL);
+  ESP_LOGI(TAG, " Discovery !!\n");
 }
 
 static void
@@ -189,6 +251,7 @@ static int client_main(void)
     tcpip_adapter_ip_info_t ip4_info = { 0 };
     struct ip6_addr if_ipaddr_ip6 = { 0 };
     ESP_LOGI(TAG, "iotivity client task started");
+
     // wait to fetch IPv4 && ipv6 address
 #ifdef OC_IPV4
     xEventGroupWaitBits(wifi_event_group, IPV4_CONNECTED_BIT, false, true, portMAX_DELAY);
@@ -217,12 +280,15 @@ static int client_main(void)
   oc_clock_time_t next_event;
 
 #ifdef OC_SECURITY
-  oc_storage_config("./client_creds");
+  oc_storage_config("./temp_sensor_creds");
 #endif /* OC_SECURITY */
+
   oc_set_con_res_announced(false);
+  
   init = oc_main_init(&handler);
   if (init < 0)
     return init;
+
   while (quit != 1) {
     next_event = oc_main_poll();
     pthread_mutex_lock(&mutex);
@@ -304,9 +370,7 @@ void app_main(void)
         print_error("nvs init failed");
     }
     pthread_cond_init(&cv, NULL);
-
     print_macro_info();
-
     initialise_wifi();
 
     if ( xTaskCreate(&client_main, "client_main", 15*1024, NULL, 5, NULL) != pdPASS ) {
