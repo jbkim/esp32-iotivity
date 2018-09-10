@@ -24,6 +24,9 @@
 #include "driver/gpio.h"
 #include "driver/i2c.h"
 
+#include "soc/timer_group_struct.h"
+#include "soc/timer_group_reg.h"
+
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "esp_wifi.h"
@@ -41,7 +44,7 @@
 #include "ssd1366.h"
 #include "font8x8_basic.h"
 
-// #define SMART_CONFIG
+#define SMART_CONFIG
 #define BTN_EVENT 
 
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -90,11 +93,11 @@ tcpip_adapter_ip_info_t ip4_info = { 0 };
 
 #ifdef SMART_CONFIG
   static bool wifi_config_needed = false;
-
+#endif
   size_t required_size;
   char *ssid;
   char *password;
-#endif
+// #endif
 
 static int
 app_init(void)
@@ -339,13 +342,17 @@ static int client_main(void)
       pthread_cond_timedwait(&cv, &mutex, &ts);
     }
     pthread_mutex_unlock(&mutex);
+
+    TIMERG0.wdt_wprotect=TIMG_WDT_WKEY_VALUE;
+    TIMERG0.wdt_feed=1;
+    TIMERG0.wdt_wprotect=0;
   }
 
   oc_main_shutdown();
   return 0;
 }
 
-#ifdef SMART_CONFIG
+// #ifdef SMART_CONFIG
 void nvs_read()
 {
   nvs_handle my_handle;
@@ -380,6 +387,8 @@ void nvs_read()
 
   nvs_close(my_handle);
 }
+
+#ifdef SMART_CONFIG
 
 void nvs_write(char * wifi_ssid, char * wifi_pass)
 {
@@ -444,11 +453,13 @@ static void sc_callback(smartconfig_status_t status, void *pdata)
     }
 }
 
-void smartconfig_example_task(void * parm)
+void smartconfig_task(void * parm)
 {
     EventBits_t uxBits;
+
     ESP_ERROR_CHECK( esp_smartconfig_set_type(SC_TYPE_ESPTOUCH) );
     ESP_ERROR_CHECK( esp_smartconfig_start(sc_callback) );
+
     while (1) {
         uxBits = xEventGroupWaitBits(wifi_event_group, CONNECTED_BIT | ESPTOUCH_DONE_BIT, true, false, portMAX_DELAY); 
         if(uxBits & CONNECTED_BIT) {
@@ -459,7 +470,7 @@ void smartconfig_example_task(void * parm)
             esp_smartconfig_stop();
             wifi_config_needed = false;
             // reboot
-            // esp_restart();
+            esp_restart();
 
             vTaskDelete(NULL);            
         }
@@ -473,8 +484,9 @@ static esp_err_t event_handler(void *ctx, system_event_t *event)
     switch (event->event_id) {
     case SYSTEM_EVENT_STA_START:
         #ifdef SMART_CONFIG
+          // smart config
           if (wifi_config_needed == true) {
-            xTaskCreate(smartconfig_example_task, "smartconfig_example_task", 4096, NULL, 3, NULL);
+            xTaskCreate(smartconfig_task, "smartconfig_task", 4096, NULL, 3, NULL);
           } else {
             esp_wifi_connect();
           }
@@ -521,17 +533,14 @@ static void initialise_wifi(void)
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    // if (wifi_config_needed == true) {
-      #if 0
+#ifdef SMART_CONFIG
+
+    if (wifi_config_needed == true) {
       // smart_config
       ESP_ERROR_CHECK( esp_wifi_set_mode(WIFI_MODE_STA) );
-      ESP_ERROR_CHECK( esp_wifi_start() );
-      #endif
-    // } else {
-      ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
 
-      // nvs_read();
-      // wifi_config_t wifi_config;
+    } else {
+      ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
 
       wifi_config_t wifi_config = {
           .sta = {
@@ -540,14 +549,40 @@ static void initialise_wifi(void)
           },
       };
 
-    // strncpy((char*) wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid));
-    // strncpy((char*) wifi_config.sta.password, password, sizeof(wifi_config.sta.password));
+      nvs_read();
+
+      strncpy((char*) wifi_config.sta.ssid, ssid, strlen(ssid));
+      wifi_config.sta.ssid[strlen(ssid)] = '\0';
+      strncpy((char*) wifi_config.sta.password, password, strlen(password));
+      wifi_config.sta.password[strlen(password)] = '\0';      
 
       ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
       ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config));
-    // }   
+    }   
 
-    ESP_ERROR_CHECK(esp_wifi_start());
+#else
+      ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
+
+
+      wifi_config_t wifi_config = {
+          .sta = {
+              .ssid = EXAMPLE_WIFI_SSID,
+              .password = EXAMPLE_WIFI_PASS,
+          },
+      };
+
+      nvs_read();
+
+      strncpy((char*) wifi_config.sta.ssid, ssid, strlen(ssid));
+      wifi_config.sta.ssid[strlen(ssid)] = '\0';
+      strncpy((char*) wifi_config.sta.password, password, strlen(password));
+      wifi_config.sta.password[strlen(password)] = '\0';      
+
+      ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+      ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config));
+#endif    
+
+      ESP_ERROR_CHECK(esp_wifi_start());
 }
 
 
@@ -723,15 +758,25 @@ void oled_task(void *pvParameter)
   char  ptr[64];
 
   vTaskDelay(1000/portTICK_PERIOD_MS);
-  i2c_master_init();
-  ssd1306_init();
+  // i2c_master_init();
+  // ssd1306_init();
 
   task_ssd1306_display_clear(NULL);
   vTaskDelay(100/portTICK_PERIOD_MS);
 
   while(1) {
+#ifdef SMART_CONFIG
+    if (wifi_config_needed == true) {
     sprintf(ptr, "%s\nIP:%s\nTemp : %2dC \nMist : %s", 
+        "Smart Config", ip4addr_ntoa(&(ip4_info.ip)), 0, "Off");
+    }else {
+      sprintf(ptr, "%s\nIP:%s\nTemp : %2dC \nMist : %s", 
+        ssid, ip4addr_ntoa(&(ip4_info.ip)), temperature, switch_state?"Off":"On ");
+    }
+#else      
+    sprintf(ptr, "%s\nIP:%s\nTemp : %2dC \nMist : %s",     
       EXAMPLE_WIFI_SSID, ip4addr_ntoa(&(ip4_info.ip)), temperature, switch_state?"Off":"On ");
+#endif    
     
     task_ssd1306_display_text((void *)ptr);
 
@@ -806,26 +851,37 @@ void app_main(void)
     pthread_cond_init(&cv, NULL);
     print_macro_info();
 
+    i2c_master_init();
+    ssd1306_init();
+
 #ifdef SMART_CONFIG
     // wifi config btn
     gpio_pad_select_gpio(GPIO_INPUT_IO_2);
     gpio_set_direction(GPIO_INPUT_IO_2, GPIO_MODE_INPUT);
 
     if (gpio_get_level(GPIO_INPUT_IO_2) == 0) {
-      ESP_LOGI(TAG, "Smart config start");
+      ESP_LOGI(TAG, "\r\nSmart config start\r\n");
       wifi_config_needed = true;    
+
+      vTaskDelay(1000/portTICK_PERIOD_MS);
     }
 #endif
+      if (xTaskCreate(&oled_task, "oled_task", 12*1024, NULL, 5, NULL) != pdPASS ) {
+            print_error("task create failed");
+      }     
 
     initialise_wifi();
-    init_btn();
 
-    if ( xTaskCreate(&client_main, "client_main", 16*1024, NULL, 5, NULL) != pdPASS ) {
-        print_error("task create failed");
-    }
+    if (wifi_config_needed == false) {
+      init_btn();
 
-    if (xTaskCreate(&oled_task, "oled_task", 12*1024, NULL, 5, NULL) != pdPASS ) {
+      if ( xTaskCreate(&client_main, "client_main", 16*1024, NULL, 5, NULL) != pdPASS ) {
           print_error("task create failed");
-    }     
+      }
+
+      // if (xTaskCreate(&oled_task, "oled_task", 12*1024, NULL, 5, NULL) != pdPASS ) {
+      //       print_error("task create failed");
+      // }     
+    }
     
 }

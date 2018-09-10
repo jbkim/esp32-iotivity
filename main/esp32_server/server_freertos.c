@@ -25,12 +25,17 @@
 #include "driver/gpio.h"
 #include "driver/i2c.h"
 
+#include "soc/timer_group_struct.h"
+#include "soc/timer_group_reg.h"
+
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "esp_wifi.h"
 #include "esp_event_loop.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_system.h"
+#include "esp_smartconfig.h"
 
 #include "oc_api.h"
 #include "port/oc_clock.h"
@@ -43,6 +48,7 @@
 #define SCL_PIN     GPIO_NUM_22
 #define DHT_GPIO    GPIO_NUM_27
 #define RELAY_GPIO  GPIO_NUM_19
+#define RELAY_IN_GPIO GPIO_NUM_18
 
 #define SSD1306_LCDHEIGHT 32
 
@@ -62,8 +68,25 @@ static struct timespec ts;
 static int quit = 0;
 
 tcpip_adapter_ip_info_t ip4_info = { 0 };
+
+#define SMART_CONFIG 
+#ifdef SMART_CONFIG
+
+static const int CONNECTED_BIT = BIT2;
+static const int ESPTOUCH_DONE_BIT = BIT3;
+
+  #define C_BTN   14
+  #define GPIO_INPUT_IO_2     C_BTN // for smartconfig
+
+  static bool wifi_config_needed = false;
+  size_t required_size;
+  char *ssid;
+  char *password;  
+#endif
+
+
 int temp;
-static bool switch_state = false;
+bool switch_state = false;
 
 static const char *TAG = "iotivity server";
 
@@ -81,7 +104,7 @@ static void
 get_temp(oc_request_t *request, oc_interface_mask_t interface, void *user_data)
 {
   (void)user_data;
-  PRINT("\r\nGET_temp:\n");
+  PRINT("GET_temp: ");
 
   oc_rep_start_root_object();
   switch (interface) {
@@ -97,7 +120,7 @@ get_temp(oc_request_t *request, oc_interface_mask_t interface, void *user_data)
 
   oc_rep_end_root_object();
   oc_send_response(request, OC_STATUS_OK);
-  PRINT("\r\nTemp = %d C\n", temp);
+  PRINT("Temp = %d C\n", temp);
 }
 
 #if 0
@@ -168,7 +191,8 @@ post_switch(oc_request_t *request, oc_interface_mask_t interface,
     case OC_REP_BOOL:
       state = rep->value.boolean;     
       switch_state = state;
-      PRINT("\r\nswitch_state = %s\n", switch_state?"On ":"Off" );
+      PRINT("switch_state = %s\n", switch_state?"On ":"Off" );
+      // PRINT("\r\nswitch_state = %s\n", switch_state?"Off":"On " );      
 
       if (switch_state == true) {
         gpio_set_level(RELAY_GPIO, 1);  // relay on
@@ -212,11 +236,6 @@ static void register_resources(void)
   oc_resource_bind_resource_interface(temp, OC_IF_R);
   oc_resource_set_default_interface(temp, OC_IF_R);
 
-  // oc_resource_bind_resource_interface(temp, OC_IF_A);
-  // oc_resource_bind_resource_interface(temp, OC_IF_S);
-  // oc_resource_set_default_interface(temp, OC_IF_A);
-
-
   oc_resource_set_discoverable(temp, true);
   oc_resource_set_periodic_observable(temp, 1);
   oc_resource_set_request_handler(temp, OC_GET, get_temp, NULL);
@@ -232,6 +251,132 @@ static void register_resources(void)
   oc_resource_set_request_handler(bswitch, OC_POST, post_switch, NULL);
   oc_add_resource(bswitch);
 }
+
+
+void nvs_read()
+{
+  nvs_handle my_handle;
+
+  ESP_LOGI(TAG, "nvs_read !!");    
+
+  esp_err_t err = nvs_open("storage", NVS_READWRITE, &my_handle);
+  if (err != ESP_OK) {
+      printf("Error (%s) opening NVS handle!\n", esp_err_to_name(err));
+  } else {
+        nvs_get_str(my_handle, "ssid", NULL, &required_size);
+        ssid = malloc(required_size);
+        err = nvs_get_str(my_handle, "ssid", ssid, &required_size);
+
+        nvs_get_str(my_handle, "password", NULL, &required_size);
+        password = malloc(required_size);
+        err = nvs_get_str(my_handle, "password", password, &required_size);
+
+        switch (err) {
+            case ESP_OK:
+                printf("NVS read done\n");
+                printf("SSID = %s\n", ssid);
+                printf("PW = %s\n", password);
+                break;
+            case ESP_ERR_NVS_NOT_FOUND:
+                printf("The value is not initialized yet!\n");
+                break;
+            default :
+                printf("Error (%s) reading!\n", esp_err_to_name(err));
+        }
+  }
+
+  nvs_close(my_handle);
+}
+
+#ifdef SMART_CONFIG
+
+void nvs_write(char * wifi_ssid, char * wifi_pass)
+{
+  nvs_handle my_handle;
+
+  esp_err_t err = nvs_open("storage", NVS_READWRITE, &my_handle);
+  if (err != ESP_OK) {
+      printf("Error (%s) opening NVS handle!\n", esp_err_to_name(err));
+  } else {
+      err = nvs_set_str(my_handle, "ssid", wifi_ssid);
+      printf((err != ESP_OK) ? "Failed!\n" : "Done\n");
+
+      err = nvs_set_str(my_handle, "password", wifi_pass);
+      printf((err != ESP_OK) ? "Failed!\n" : "Done\n");
+
+      // Commit written value.
+      // After setting any values, nvs_commit() must be called to ensure changes are written
+      // to flash storage. Implementations may write to storage at other times,
+      // but this is not guaranteed.
+      printf("Committing updates in NVS ... ");
+      err = nvs_commit(my_handle);
+      printf((err != ESP_OK) ? "Failed!\n" : "Done\n");
+  }
+  nvs_close(my_handle);
+}
+
+static void sc_callback(smartconfig_status_t status, void *pdata)
+{
+    switch (status) {
+        case SC_STATUS_WAIT:
+            ESP_LOGI(TAG, "SC_STATUS_WAIT");
+            break;
+        case SC_STATUS_FIND_CHANNEL:
+            ESP_LOGI(TAG, "SC_STATUS_FINDING_CHANNEL");
+            break;
+        case SC_STATUS_GETTING_SSID_PSWD:
+            ESP_LOGI(TAG, "SC_STATUS_GETTING_SSID_PSWD");
+            break;
+        case SC_STATUS_LINK:
+            ESP_LOGI(TAG, "SC_STATUS_LINK");
+            wifi_config_t *wifi_config = pdata;
+            ESP_LOGI(TAG, "SSID:%s", wifi_config->sta.ssid);
+            ESP_LOGI(TAG, "PASSWORD:%s", wifi_config->sta.password); 
+
+            nvs_write(&wifi_config->sta.ssid, &wifi_config->sta.password);
+
+            ESP_ERROR_CHECK( esp_wifi_disconnect() );
+            ESP_ERROR_CHECK( esp_wifi_set_config(ESP_IF_WIFI_STA, wifi_config) );
+            ESP_ERROR_CHECK( esp_wifi_connect() );
+            break;
+        case SC_STATUS_LINK_OVER:
+            ESP_LOGI(TAG, "SC_STATUS_LINK_OVER");
+            if (pdata != NULL) {
+                uint8_t phone_ip[4] = { 0 };
+                memcpy(phone_ip, (uint8_t* )pdata, 4);
+                ESP_LOGI(TAG, "Phone ip: %d.%d.%d.%d\n", phone_ip[0], phone_ip[1], phone_ip[2], phone_ip[3]);
+            }
+            xEventGroupSetBits(wifi_event_group, ESPTOUCH_DONE_BIT);
+            break;
+        default:
+            break;
+    }
+}
+
+void smartconfig_task(void * parm)
+{
+    EventBits_t uxBits;
+
+    ESP_ERROR_CHECK( esp_smartconfig_set_type(SC_TYPE_ESPTOUCH) );
+    ESP_ERROR_CHECK( esp_smartconfig_start(sc_callback) );
+
+    while (1) {
+        uxBits = xEventGroupWaitBits(wifi_event_group, CONNECTED_BIT | ESPTOUCH_DONE_BIT, true, false, portMAX_DELAY); 
+        if(uxBits & CONNECTED_BIT) {
+            ESP_LOGI(TAG, "WiFi Connected to ap");
+        }
+        if(uxBits & ESPTOUCH_DONE_BIT) {
+            ESP_LOGI(TAG, "smartconfig over");
+            esp_smartconfig_stop();
+            wifi_config_needed = false;
+            // reboot
+            esp_restart();
+
+            vTaskDelete(NULL);            
+        }
+    }
+}
+#endif 
 
 
 static void
@@ -254,7 +399,16 @@ static esp_err_t event_handler(void *ctx, system_event_t *event)
 {
     switch (event->event_id) {
     case SYSTEM_EVENT_STA_START:
-        esp_wifi_connect();
+        #ifdef SMART_CONFIG
+          // smart config
+          if (wifi_config_needed == true) {
+            xTaskCreate(smartconfig_task, "smartconfig_task", 4096, NULL, 3, NULL);
+          } else {
+            esp_wifi_connect();
+          }
+        #else
+            esp_wifi_connect();          
+        #endif
         break;
 
     case SYSTEM_EVENT_STA_GOT_IP:
@@ -288,6 +442,27 @@ static esp_err_t event_handler(void *ctx, system_event_t *event)
     return ESP_OK;
 }
 
+// static void initialise_wifi(void)
+// {
+//     tcpip_adapter_init();
+//     wifi_event_group = xEventGroupCreate();
+//     ESP_ERROR_CHECK(esp_event_loop_init(event_handler, NULL));
+//     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+//     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+//     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
+
+//     wifi_config_t wifi_config = {
+//         .sta = {
+//             .ssid = EXAMPLE_WIFI_SSID,
+//             .password = EXAMPLE_WIFI_PASS,
+//         },
+//     };
+
+//     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+//     ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config));
+//     ESP_ERROR_CHECK(esp_wifi_start());
+// }
+
 static void initialise_wifi(void)
 {
     tcpip_adapter_init();
@@ -295,18 +470,57 @@ static void initialise_wifi(void)
     ESP_ERROR_CHECK(esp_event_loop_init(event_handler, NULL));
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
 
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = EXAMPLE_WIFI_SSID,
-            .password = EXAMPLE_WIFI_PASS,
-        },
-    };
+#ifdef SMART_CONFIG
 
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config));
-    ESP_ERROR_CHECK(esp_wifi_start());
+    if (wifi_config_needed == true) {
+      // smart_config
+      ESP_ERROR_CHECK( esp_wifi_set_mode(WIFI_MODE_STA) );
+
+    } else {
+      ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
+
+      wifi_config_t wifi_config = {
+          .sta = {
+              .ssid = EXAMPLE_WIFI_SSID,
+              .password = EXAMPLE_WIFI_PASS,
+          },
+      };
+
+      nvs_read();
+
+      strncpy((char*) wifi_config.sta.ssid, ssid, strlen(ssid));
+      wifi_config.sta.ssid[strlen(ssid)] = '\0';
+      strncpy((char*) wifi_config.sta.password, password, strlen(password));
+      wifi_config.sta.password[strlen(password)] = '\0';      
+
+      ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+      ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config));
+    }   
+
+#else
+      ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
+
+
+      wifi_config_t wifi_config = {
+          .sta = {
+              .ssid = EXAMPLE_WIFI_SSID,
+              .password = EXAMPLE_WIFI_PASS,
+          },
+      };
+
+      nvs_read();
+
+      strncpy((char*) wifi_config.sta.ssid, ssid, strlen(ssid));
+      wifi_config.sta.ssid[strlen(ssid)] = '\0';
+      strncpy((char*) wifi_config.sta.password, password, strlen(password));
+      wifi_config.sta.password[strlen(password)] = '\0';      
+
+      ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+      ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config));
+#endif    
+
+      ESP_ERROR_CHECK(esp_wifi_start());
 }
 
 // oled
@@ -492,6 +706,11 @@ void gpio_init()
     gpio_set_pull_mode(RELAY_GPIO, GPIO_PULLUP_ONLY);  
     gpio_set_level(RELAY_GPIO, 0);  // relay off
 
+   // To read GPIO outpur 
+    gpio_pad_select_gpio(RELAY_IN_GPIO);
+    gpio_set_direction(DHT_GPIO, GPIO_MODE_INPUT);
+    gpio_set_pull_mode(DHT_GPIO, GPIO_FLOATING);  
+
 }
 
 // Display IP info & Temp, Humidity
@@ -501,21 +720,39 @@ void oled_task(void *pvParameter)
   float f_humidity, f_temp;
 
   gpio_init();
+  switch_state = false;
+
   vTaskDelay(1000/portTICK_PERIOD_MS);
-  i2c_master_init();
-  ssd1306_init();
+  // i2c_master_init();
+  // ssd1306_init();
 
   task_ssd1306_display_clear(NULL);
   vTaskDelay(100/portTICK_PERIOD_MS);
 
   while(1) {
+    
+    // if (gpio_get_level(RELAY_IN_GPIO) == 0) {
+    //   switch_state = false;
+    // }else {
+    //   switch_state = true;
+    // }
+
     dht_read_float_data(GPIO_ID_PIN(DHT_GPIO), &f_humidity, &f_temp);
     temp = (int)f_temp;
-    // ESP_LOGI(TAG, "Temperature: %2.1f, Humidity: %2.1f\n", f_temp, f_humidity );  
 
-    // sprintf(ptr, "TP-Link_744A\nIP:%s\nT:%2.1fC, H:%2.1f%%\nCooler : %s", ip4addr_ntoa(&(ip4_info.ip)), f_temp, f_humidity, "Off");
-    sprintf(ptr, "%s\nIP:%s\nT:%2.1fC, H:%2.1f%%\nCooler : %s", 
-      EXAMPLE_WIFI_SSID, ip4addr_ntoa(&(ip4_info.ip)), f_temp, f_humidity, switch_state?"Off":"On ");
+#ifdef SMART_CONFIG
+    if (wifi_config_needed == true) {
+    sprintf(ptr, "%s\nIP:%s\nTemp : %2dC \nMist : %s", 
+        "Smart Config", ip4addr_ntoa(&(ip4_info.ip)), 0, "Off");
+    }else {
+      sprintf(ptr, "%s\nIP:%s\nTemp : %2dC \nMist : %s", 
+        ssid, ip4addr_ntoa(&(ip4_info.ip)), temp, switch_state?"On ":"Off");
+    }
+#else      
+    sprintf(ptr, "%s\nIP:%s\nTemp : %2dC \nMist : %s",     
+      EXAMPLE_WIFI_SSID, ip4addr_ntoa(&(ip4_info.ip)), temp, switch_state?"On ":"Off");
+#endif    
+
     task_ssd1306_display_text((void *)ptr);
 
     vTaskDelay(1000 / portTICK_RATE_MS);
@@ -527,10 +764,7 @@ void oled_task(void *pvParameter)
 static int server_main(void* pvParameter)
 {
   int init;
-  // tcpip_adapter_ip_info_t ip4_info = { 0 };
   struct ip6_addr if_ipaddr_ip6 = { 0 };
-  // char  ptr[64];
-  // float f_humidity, f_temp;
 
   ESP_LOGI(TAG, "iotivity server task started");
   // wait to fetch IPv4 && ipv6 address
@@ -579,6 +813,10 @@ static int server_main(void* pvParameter)
       pthread_cond_timedwait(&cv, &mutex, &ts);
     }
     pthread_mutex_unlock(&mutex);
+
+    TIMERG0.wdt_wprotect=TIMG_WDT_WKEY_VALUE;
+    TIMERG0.wdt_feed=1;
+    TIMERG0.wdt_wprotect=0;
   }
 
   oc_main_shutdown();
@@ -593,25 +831,37 @@ void app_main(void)
 
     pthread_cond_init(&cv, NULL);
     print_macro_info();
-    initialise_wifi();
 
-    if ( xTaskCreate(&server_main, "server_main", 15*1024, NULL, 5, NULL) != pdPASS ) {
-        print_error("task create failed");
-    }
+    i2c_master_init();
+    ssd1306_init();
 
-#if 1
-    // if ( xTaskCreate(&smartaircon_damon_task, "smartaircon_damon_task", 8192, NULL, 5, NULL) != pdPASS ) {
-    //     print_error("task create failed");
-    // }
-#else    
-    if ( xTaskCreate(&lightbulb_damon_task, "lightbulb_damon_task", 8192, NULL, 5, NULL) != pdPASS ) {
-        print_error("task create failed");
+#ifdef SMART_CONFIG
+    // wifi config btn
+    gpio_pad_select_gpio(GPIO_INPUT_IO_2);
+    gpio_set_direction(GPIO_INPUT_IO_2, GPIO_MODE_INPUT);
+
+    if (gpio_get_level(GPIO_INPUT_IO_2) == 0) {
+      ESP_LOGI(TAG, "\r\nSmart config start\r\n");
+      wifi_config_needed = true;    
+
+      vTaskDelay(1000/portTICK_PERIOD_MS);
     }
 #endif
-
     if (xTaskCreate(&oled_task, "oled_task", 2048, NULL, 5, NULL) != pdPASS ) {
         print_error("task create failed");
     }     
+
+    initialise_wifi();
+
+    if (wifi_config_needed == false) {    
+      if ( xTaskCreate(&server_main, "server_main", 15*1024, NULL, 5, NULL) != pdPASS ) {
+          print_error("task create failed");
+      }
+    } 
+
+    // if (xTaskCreate(&oled_task, "oled_task", 2048, NULL, 5, NULL) != pdPASS ) {
+    //     print_error("task create failed");
+    // }     
 
 }
 
